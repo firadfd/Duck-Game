@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1f3a">
+  <title>Duck Hunt</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Yandex Games SDK -->
+  <script src="/sdk.js"></script>
+</head>
+<body>
+  <!-- Loading screen -->
+  <div id="loadingScreen" class="screen visible">
+    <div class="loader">
+      <div class="loader-duck">🦆</div>
+      <div class="loader-text" data-i18n="loading">Loading...</div>
+      <div class="loader-bar"><div class="loader-bar-fill"></div></div>
+    </div>
+  </div>
+
+  <!-- Top bar with language switcher and sound -->
+  <div id="topBar" class="top-bar hidden">
+    <button id="langBtn" class="icon-btn" aria-label="Change language">
+      <span id="langLabel">EN</span>
+    </button>
+    <button id="soundBtn" class="icon-btn" aria-label="Toggle sound">
+      <span id="soundIcon">🔊</span>
+    </button>
+    <button id="pauseBtn" class="icon-btn hidden" aria-label="Pause">
+      <span>⏸</span>
+    </button>
+  </div>
+
+  <!-- Game canvas -->
+  <div id="gameWrapper" class="game-wrapper">
+    <canvas id="gameCanvas" width="1024" height="640" aria-label="Duck Hunt game canvas"></canvas>
+
+    <!-- HUD overlay -->
+    <div id="hud" class="hud hidden">
+      <div class="hud-row">
+        <div class="hud-cell">
+          <div class="hud-label" data-i18n="score">Score</div>
+          <div id="hudScore" class="hud-value">0</div>
+        </div>
+        <div class="hud-cell">
+          <div class="hud-label" data-i18n="wave">Wave</div>
+          <div id="hudWave" class="hud-value">1</div>
+        </div>
+        <div class="hud-cell">
+          <div class="hud-label" data-i18n="ammo">Ammo</div>
+          <div id="hudAmmo" class="hud-value">●●●</div>
+        </div>
+        <div class="hud-cell">
+          <div class="hud-label" data-i18n="best">Best</div>
+          <div id="hudBest" class="hud-value">0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main menu -->
+    <div id="menuScreen" class="overlay hidden">
+      <div class="panel">
+        <h1 id="menuTitle" data-i18n="title">Duck Hunt</h1>
+        <p class="subtitle" data-i18n="subtitle">Arcade Shooter</p>
+        <div id="userBadge" class="user-badge hidden">
+          <span data-i18n="signedIn">Signed in as</span>
+          <strong id="userName">Guest</strong>
+        </div>
+        <button id="startBtn" class="btn btn-primary" data-i18n="start">Start Game</button>
+        <button id="howToBtn" class="btn btn-secondary" data-i18n="howToPlay">How to play</button>
+        <button id="leaderboardBtn" class="btn btn-secondary" data-i18n="leaderboard">Leaderboard</button>
+        <button id="shopBtn" class="btn btn-secondary hidden" data-i18n="shop">Shop</button>
+        <button id="signInBtn" class="btn btn-secondary hidden" data-i18n="signIn">Sign in with Yandex</button>
+        <div class="best-row">
+          <span data-i18n="best">Best</span>: <span id="menuBest">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pause menu -->
+    <div id="pauseScreen" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">Paused</h2>
+        <button id="resumeBtn" class="btn btn-primary" data-i18n="resume">Resume</button>
+        <button id="pauseMenuBtn" class="btn btn-secondary" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Game over screen -->
+    <div id="gameOverScreen" class="overlay hidden">
+      <div class="panel">
+        <h2 id="gameOverTitle" data-i18n="gameOver">Game Over!</h2>
+        <div id="newRecordBadge" class="badge hidden" data-i18n="newRecord">New Record!</div>
+        <div class="stats">
+          <div class="stat-row">
+            <span data-i18n="score">Score</span>:
+            <strong id="finalScore">0</strong>
+          </div>
+          <div class="stat-row">
+            <span data-i18n="wave">Wave</span>:
+            <strong id="finalWave">1</strong>
+          </div>
+          <div class="stat-row">
+            <span data-i18n="hits">Hits</span>:
+            <strong id="finalHits">0</strong>
+          </div>
+          <div class="stat-row">
+            <span data-i18n="accuracy">Accuracy</span>:
+            <strong id="finalAccuracy">0%</strong>
+          </div>
+        </div>
+        <button id="restartBtn" class="btn btn-primary" data-i18n="restart">Restart</button>
+        <button id="overMenuBtn" class="btn btn-secondary" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- How to play screen -->
+    <div id="howToScreen" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="howToPlay">How to play</h2>
+        <p id="howToText" data-i18n="howToPlayText">...</p>
+        <button id="howToOkBtn" class="btn btn-primary" data-i18n="ok">OK</button>
+      </div>
+    </div>
+
+    <!-- Leaderboard screen -->
+    <div id="leaderboardScreen" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="leaderboard">Leaderboard</h2>
+        <div id="leaderboardList" class="leaderboard-list">
+          <div class="muted" data-i18n="loading">Loading...</div>
+        </div>
+        <button id="lbBackBtn" class="btn btn-primary" data-i18n="back">Back</button>
+      </div>
+    </div>
+
+    <!-- Shop screen -->
+    <div id="shopScreen" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="shop">Shop</h2>
+        <div class="shop-items">
+          <div class="shop-item">
+            <div class="shop-item-info">
+              <strong data-i18n="buyAmmo">Buy ammo</strong>
+              <span class="muted" data-i18n="buyAmmoDesc">+2 bullets</span>
+            </div>
+            <button id="buyAmmoBtn" class="btn btn-primary shop-btn">—</button>
+          </div>
+          <div class="shop-item">
+            <div class="shop-item-info">
+              <strong data-i18n="buySkin">Unlock skin</strong>
+              <span class="muted" data-i18n="buySkinDesc">Golden crosshair</span>
+            </div>
+            <button id="buySkinBtn" class="btn btn-primary shop-btn">—</button>
+          </div>
+        </div>
+        <div id="shopMsg" class="shop-msg hidden"></div>
+        <button id="shopBackBtn" class="btn btn-secondary" data-i18n="back">Back</button>
+      </div>
+    </div>
+
+    <!-- Wave complete toast -->
+    <div id="waveToast" class="toast hidden">
+      <div class="toast-title" data-i18n="waveComplete">Wave Complete!</div>
+      <div class="toast-bonus"><span data-i18n="bonus">Bonus</span>: +<span id="waveBonus">0</span></div>
+    </div>
+
+    <!-- Dog speech bubble (for laughing dog) -->
+    <div id="dogBubble" class="dog-bubble hidden"></div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="i18n.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
