@@ -12,13 +12,20 @@
     BASE_W: 1024,            // logical canvas width
     BASE_H: 640,             // logical canvas height (≈16:10, well under 1:2)
     DUCKS_PER_WAVE_BASE: 3,
-    AMMO_PER_WAVE: 9999,     // unlimited ammo
+    ARCADE_AMMO: 9999,       // unlimited ammo display
+    CLASSIC_AMMO_PER_WAVE: 3,
     DUCK_LIFETIME_MS: 6000,  // time before duck flies away
     HIT_SCORE: 100,
     HEADSHOT_SCORE: 250,     // bonus points for headshot
     HEADSHOT_RADIUS: 14,     // tight radius around duck head centre
     WAVE_BONUS: 150,
     PERFECT_BONUS: 300,
+    POWERUP_LIFETIME_MS: 6500,
+    POWERUP_CHANCE_ARCADE: 0.12,
+    POWERUP_CHANCE_CLASSIC: 0.22,
+    SLOW_MO_MS: 5500,
+    SCORE_BOOST_MS: 8000,
+    FOCUS_MS: 8000,
     AD_EVERY_WAVES: 3,
     LEADERBOARD_NAME: 'topHunters', // must be created in developer console
     // In-app purchase product IDs (must be registered in developer console)
@@ -58,14 +65,22 @@
     height: CONFIG.BASE_H,
     running: false,
     paused: false,
+    endScheduled: false,
+    endTimer: null,
+    endReason: '',
     screen: 'menu', // menu | playing | paused | gameOver | howTo | leaderboard | shop
+    mode: 'arcade', // arcade | classic
     score: 0,
     best: 0,
     wave: 1,
-    ammo: CONFIG.AMMO_PER_WAVE,
+    ammo: CONFIG.ARCADE_AMMO,
     hits: 0,
+    waveHits: 0,
     shots: 0,
+    combo: 0,
+    maxCombo: 0,
     ducks: [],
+    powerUps: [],
     particles: [],
     shotEffects: [],
     floatingTexts: [],
@@ -73,6 +88,12 @@
     ducksSpawnedThisWave: 0,
     duckTargetThisWave: CONFIG.DUCKS_PER_WAVE_BASE,
     spawnTimer: 0,
+    powerUpTimer: 0,
+    effects: {
+      slowMo: 0,
+      scoreBoost: 0,
+      focus: 0
+    },
     soundOn: true,
     audioCtx: null,
     lastTime: 0,
@@ -388,7 +409,7 @@
     if (state.player && state.player.getData) {
       state.player.getData(['best', 'lang', 'soundOn', 'goldCrosshair']).then(function (data) {
         if (data && typeof data.best === 'number') state.best = data.best;
-        if (data && (data.lang === 'ru' || data.lang === 'en')) {
+        if (data && window.i18n.getAvailableLanguages().indexOf(data.lang) !== -1) {
           window.i18n.setLanguage(data.lang);
         }
         if (data && typeof data.soundOn === 'boolean') state.soundOn = data.soundOn;
@@ -407,7 +428,7 @@
       const b = parseInt(localStorage.getItem('duck_best') || '0', 10);
       if (!isNaN(b)) state.best = b;
       const l = localStorage.getItem('duck_lang');
-      if (l === 'ru' || l === 'en') window.i18n.setLanguage(l);
+      if (window.i18n.getAvailableLanguages().indexOf(l) !== -1) window.i18n.setLanguage(l);
       const s = localStorage.getItem('duck_sound');
       if (s !== null) state.soundOn = s === '1';
       if (localStorage.getItem('duck_gold_crosshair') === '1') {
@@ -520,8 +541,8 @@
   // ============================================
   function spawnDuck() {
     const fromLeft = Math.random() < 0.5;
-    const difficulty = Math.floor(state.hits / 5);
-    const speed = 110 + difficulty * 8 + Math.random() * 70;
+    const difficulty = getDifficulty();
+    const speed = 110 + difficulty.speedBonus + Math.random() * 70;
     const y0 = 100 + Math.random() * (state.height - 280);
     // Type selection: 15% gold, otherwise random of brown/mallard/wood
     const r = Math.random();
@@ -535,16 +556,34 @@
       y: y0,
       vx: (fromLeft ? 1 : -1) * speed,
       vy: (Math.random() - 0.5) * 40,
-      w: 96, h: 72,
+      w: 96 * difficulty.sizeScale,
+      h: 72 * difficulty.sizeScale,
       flap: 0,                          // animation accumulator
       alive: true,
       flying: true,
       falling: false,
-      lifetime: CONFIG.DUCK_LIFETIME_MS,
+      lifetime: difficulty.lifetime,
       type: type
     };
     state.ducks.push(duck);
     state.ducksSpawnedThisWave++;
+  }
+
+  function getDifficulty() {
+    if (state.mode === 'classic') {
+      const waveStep = Math.max(0, state.wave - 1);
+      return {
+        speedBonus: Math.min(115, waveStep * 13),
+        sizeScale: Math.max(0.76, 1 - waveStep * 0.025),
+        lifetime: Math.max(3300, CONFIG.DUCK_LIFETIME_MS - waveStep * 280)
+      };
+    }
+    const hitStep = Math.floor(state.hits / 5);
+    return {
+      speedBonus: hitStep * 8,
+      sizeScale: 1,
+      lifetime: CONFIG.DUCK_LIFETIME_MS
+    };
   }
 
   function hitDuck(duck, isHeadshot) {
@@ -554,8 +593,14 @@
     duck.vx *= 0.2;
     duck.vy = 80;
     state.hits++;
+    state.waveHits++;
+    state.combo++;
+    state.maxCombo = Math.max(state.maxCombo, state.combo);
+    const comboMultiplier = Math.min(5, 1 + Math.floor((state.combo - 1) / 3));
     let points = duck.type === 'gold' ? CONFIG.HIT_SCORE * 3 : CONFIG.HIT_SCORE;
     if (isHeadshot) points += CONFIG.HEADSHOT_SCORE;
+    if (state.effects.scoreBoost > 0) points *= 2;
+    points *= comboMultiplier;
     state.score += points;
     // Particle color based on duck type
     const particleColors = { gold: '#ffd166', brown: '#8b5e3c', mallard: '#5a8c4a', wood: '#5a4a8c' };
@@ -573,6 +618,10 @@
       addFloatingText('+' + points, duck.x + duck.w / 2, duck.y, duck.type === 'gold' ? '#ffd166' : '#ffffff');
       playSound('hit');
     }
+    if (comboMultiplier > 1) {
+      addFloatingText('x' + comboMultiplier + ' ' + window.i18n.t('combo'), duck.x + duck.w / 2, duck.y - 84, '#2fd6c5');
+    }
+    maybeSpawnPowerUp();
   }
 
   // ============================================
@@ -635,6 +684,57 @@
     }
   }
 
+  // ============================================
+  // Power-ups
+  // ============================================
+  function maybeSpawnPowerUp() {
+    const chance = state.mode === 'classic' ? CONFIG.POWERUP_CHANCE_CLASSIC : CONFIG.POWERUP_CHANCE_ARCADE;
+    if (Math.random() > chance || state.powerUps.length >= 2) return;
+    const types = state.mode === 'classic'
+      ? ['slow', 'boost', 'focus', 'ammo']
+      : ['slow', 'boost', 'focus'];
+    spawnPowerUp(types[Math.floor(Math.random() * types.length)]);
+  }
+
+  function spawnPowerUp(type) {
+    state.powerUps.push({
+      type: type,
+      x: 110 + Math.random() * (state.width - 220),
+      y: 95 + Math.random() * (state.height - 285),
+      r: 23,
+      pulse: Math.random() * Math.PI * 2,
+      life: CONFIG.POWERUP_LIFETIME_MS
+    });
+  }
+
+  function collectPowerUp(powerUp) {
+    if (powerUp.type === 'slow') {
+      state.effects.slowMo = CONFIG.SLOW_MO_MS;
+      addFloatingText(window.i18n.t('powerSlow'), powerUp.x, powerUp.y - 28, '#2fd6c5');
+    } else if (powerUp.type === 'boost') {
+      state.effects.scoreBoost = CONFIG.SCORE_BOOST_MS;
+      addFloatingText(window.i18n.t('powerBoost'), powerUp.x, powerUp.y - 28, '#ffc857');
+    } else if (powerUp.type === 'focus') {
+      state.effects.focus = CONFIG.FOCUS_MS;
+      addFloatingText(window.i18n.t('powerFocus'), powerUp.x, powerUp.y - 28, '#ffffff');
+    } else if (powerUp.type === 'ammo') {
+      state.ammo += 1;
+      cancelScheduledEnd('noAmmo');
+      addFloatingText(window.i18n.t('powerAmmo'), powerUp.x, powerUp.y - 28, '#7cff6b');
+    }
+    spawnParticles(powerUp.x, powerUp.y, getPowerUpColor(powerUp.type), 18);
+    playSound('wave');
+    updateHUD();
+  }
+
+  function getPowerUpColor(type) {
+    if (type === 'slow') return '#2fd6c5';
+    if (type === 'boost') return '#ffc857';
+    if (type === 'focus') return '#ffffff';
+    if (type === 'ammo') return '#7cff6b';
+    return '#ffffff';
+  }
+
   function addFloatingText(text, x, y, color) {
     state.floatingTexts.push({
       text: text, x: x, y: y,
@@ -648,13 +748,13 @@
   // ============================================
   function initClouds() {
     state.clouds = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       state.clouds.push({
         x: Math.random() * CONFIG.BASE_W,
-        y: 40 + Math.random() * 200,
-        vx: 8 + Math.random() * 12,
-        scale: 0.6 + Math.random() * 0.7,
-        alpha: 0.3 + Math.random() * 0.3
+        y: 34 + Math.random() * 190,
+        vx: 6 + Math.random() * 16,
+        scale: 0.5 + Math.random() * 0.9,
+        alpha: 0.22 + Math.random() * 0.28
       });
     }
   }
@@ -665,18 +765,30 @@
   function startGame() {
     state.score = 0;
     state.wave = 1;
-    state.ammo = CONFIG.AMMO_PER_WAVE;
+    state.ammo = state.mode === 'classic' ? CONFIG.CLASSIC_AMMO_PER_WAVE : CONFIG.ARCADE_AMMO;
     state.hits = 0;
+    state.waveHits = 0;
     state.shots = 0;
+    state.combo = 0;
+    state.maxCombo = 0;
     state.ducks = [];
+    state.powerUps = [];
     state.particles = [];
     state.shotEffects = [];
     state.floatingTexts = [];
     state.ducksSpawnedThisWave = 0;
     state.duckTargetThisWave = CONFIG.DUCKS_PER_WAVE_BASE;
     state.spawnTimer = 1500; // delay first duck so dog intro plays first
+    state.powerUpTimer = 2400;
+    state.effects.slowMo = 0;
+    state.effects.scoreBoost = 0;
+    state.effects.focus = 0;
     state.running = true;
     state.paused = false;
+    state.endScheduled = false;
+    if (state.endTimer) clearTimeout(state.endTimer);
+    state.endTimer = null;
+    state.endReason = '';
     state.screen = 'playing';
     showOnly([]);
     show('hud'); show('topBar');
@@ -699,13 +811,18 @@
       fireQualityReady();
     }
 
-    const perfect = true; // always "perfect" with unlimited ammo
+    const perfect = state.waveHits >= state.duckTargetThisWave;
     state.wave++;
-    state.ammo = CONFIG.AMMO_PER_WAVE;
-    state.duckTargetThisWave = CONFIG.DUCKS_PER_WAVE_BASE + Math.floor(state.wave / 2);
+    state.ammo = state.mode === 'classic' ? CONFIG.CLASSIC_AMMO_PER_WAVE : CONFIG.ARCADE_AMMO;
+    state.duckTargetThisWave = state.mode === 'classic'
+      ? CONFIG.DUCKS_PER_WAVE_BASE
+      : CONFIG.DUCKS_PER_WAVE_BASE + Math.floor(state.wave / 2);
     state.ducksSpawnedThisWave = 0;
+    state.waveHits = 0;
     state.ducks = [];
+    state.powerUps = [];
     state.spawnTimer = 1500; // longer delay to show dog reaction
+    state.powerUpTimer = 1800;
     updateHUD();
 
     // Show wave complete toast
@@ -744,6 +861,11 @@
   }
 
   function endGame() {
+    if (!state.running) return;
+    state.endScheduled = false;
+    if (state.endTimer) clearTimeout(state.endTimer);
+    state.endTimer = null;
+    state.endReason = '';
     state.running = false;
     state.screen = 'gameOver';
     gameplayStop();
@@ -766,6 +888,8 @@
     document.getElementById('finalHits').textContent = String(state.hits);
     const acc = state.shots > 0 ? Math.round((state.hits / state.shots) * 100) : 0;
     document.getElementById('finalAccuracy').textContent = acc + '%';
+    const maxCombo = document.getElementById('finalMaxCombo');
+    if (maxCombo) maxCombo.textContent = String(state.maxCombo);
     document.getElementById('newRecordBadge').classList.toggle('hidden', !newRecord);
 
     // Delay overlay so player sees the dog briefly
@@ -776,6 +900,21 @@
 
     // Fullscreen ad after game over flow
     setTimeout(function () { showFullscreenAd(function () { /* noop */ }); }, 2200);
+  }
+
+  function scheduleEndGame(delay, reason) {
+    if (state.endScheduled || !state.running) return;
+    state.endScheduled = true;
+    state.endReason = reason || '';
+    state.endTimer = setTimeout(endGame, delay);
+  }
+
+  function cancelScheduledEnd(reason) {
+    if (!state.endScheduled || (reason && state.endReason !== reason)) return;
+    if (state.endTimer) clearTimeout(state.endTimer);
+    state.endTimer = null;
+    state.endReason = '';
+    state.endScheduled = false;
   }
 
   function pauseGame() {
@@ -795,6 +934,10 @@
   function goToMenu() {
     state.running = false;
     state.paused = false;
+    state.endScheduled = false;
+    if (state.endTimer) clearTimeout(state.endTimer);
+    state.endTimer = null;
+    state.endReason = '';
     state.screen = 'menu';
     gameplayStop();
     updateMenuBest();
@@ -818,38 +961,58 @@
 
     if (!state.running || state.paused) return;
 
-    // Spawn ducks continuously; waves are intentionally disabled.
+    updatePowerUps(dt);
+    updateActiveEffects(dt);
+
+    // Arcade spawns forever; Classic spawns a fixed wave target.
     state.spawnTimer -= dt * 1000;
-    if (state.spawnTimer <= 0) {
+    const canSpawn = state.mode === 'arcade' || state.ducksSpawnedThisWave < state.duckTargetThisWave;
+    if (state.spawnTimer <= 0 && canSpawn) {
       spawnDuck();
-      state.spawnTimer = Math.max(280, 760 - Math.min(420, Math.floor(state.hits / 5) * 30));
+      if (state.mode === 'classic') {
+        state.spawnTimer = Math.max(520, 980 - Math.min(360, (state.wave - 1) * 55));
+      } else {
+        state.spawnTimer = Math.max(280, 760 - Math.min(420, Math.floor(state.hits / 5) * 30));
+      }
+    }
+
+    state.powerUpTimer -= dt * 1000;
+    if (state.powerUpTimer <= 0) {
+      maybeSpawnPowerUp();
+      state.powerUpTimer = state.mode === 'classic' ? 4200 : 5400;
     }
 
     // Update ducks
     for (let i = state.ducks.length - 1; i >= 0; i--) {
       const d = state.ducks[i];
       d.flap += dt * 6; // ~6 frame cycles per second for natural wing flap
+      const duckDt = state.effects.slowMo > 0 && d.alive && !d.falling ? dt * 0.52 : dt;
       if (d.falling) {
         d.vy += 600 * dt;
         d.y += d.vy * dt;
         d.x += d.vx * dt;
         if (d.y > state.height + 80) state.ducks.splice(i, 1);
       } else if (d.alive) {
-        d.x += d.vx * dt;
-        d.y += d.vy * dt;
+        d.x += d.vx * duckDt;
+        d.y += d.vy * duckDt;
         // Bounce off vertical bounds
         if (d.y < 60 || d.y > state.height - 200) d.vy *= -1;
         // Slight zigzag
-        d.vy += (Math.random() - 0.5) * 20;
+        d.vy += (Math.random() - 0.5) * 20 * duckDt / Math.max(dt, 0.001);
         d.vy = Math.max(-80, Math.min(80, d.vy));
-        d.lifetime -= dt * 1000;
+        d.lifetime -= duckDt * 1000;
         if (d.lifetime <= 0) {
           // fly up & away
           d.flying = false;
           d.alive = false;
           d.vy = -200;
           d.vx *= 0.6;
+          state.combo = 0;
+          updateHUD();
           addFloatingText(window.i18n.t('flyAway'), d.x + d.w / 2, d.y, '#ff6b6b');
+          if (state.mode === 'classic') {
+            scheduleEndGame(450, 'flyAway');
+          }
         }
         // Out of horizontal bounds
         if (d.x < -120 || d.x > state.width + 120) state.ducks.splice(i, 1);
@@ -887,6 +1050,36 @@
     }
 
     if (!state.qualityReadyFired && state.hits >= CONFIG.QUALITY_READY_WAVE) fireQualityReady();
+
+    if (state.mode === 'classic' && state.running) {
+      const activeDucks = state.ducks.some(function (d) { return d.alive || d.falling; });
+      if (state.ducksSpawnedThisWave >= state.duckTargetThisWave && !activeDucks) {
+        if (state.waveHits >= state.duckTargetThisWave) nextWave();
+        else endGame();
+      } else if (state.ammo <= 0 && state.waveHits < state.duckTargetThisWave) {
+        const hittableDucks = state.ducks.some(function (d) { return d.alive; });
+        if (hittableDucks || state.ducksSpawnedThisWave < state.duckTargetThisWave) {
+          if (!state.endScheduled) addFloatingText(window.i18n.t('noAmmo'), state.width / 2, 92, '#ff5d6c');
+          scheduleEndGame(500, 'noAmmo');
+        }
+      }
+    }
+  }
+
+  function updatePowerUps(dt) {
+    for (let i = state.powerUps.length - 1; i >= 0; i--) {
+      const p = state.powerUps[i];
+      p.life -= dt * 1000;
+      p.pulse += dt * 5;
+      if (p.life <= 0) state.powerUps.splice(i, 1);
+    }
+  }
+
+  function updateActiveEffects(dt) {
+    const elapsed = dt * 1000;
+    state.effects.slowMo = Math.max(0, state.effects.slowMo - elapsed);
+    state.effects.scoreBoost = Math.max(0, state.effects.scoreBoost - elapsed);
+    state.effects.focus = Math.max(0, state.effects.focus - elapsed);
   }
 
   function render() {
@@ -895,51 +1088,108 @@
 
     // Sky gradient
     const sky = ctx.createLinearGradient(0, 0, 0, h);
-    sky.addColorStop(0, '#5d8fc7');
-    sky.addColorStop(0.6, '#9ec6e8');
-    sky.addColorStop(1, '#fce8a4');
+    sky.addColorStop(0, '#173b67');
+    sky.addColorStop(0.42, '#5a9bd1');
+    sky.addColorStop(0.72, '#b7d7e4');
+    sky.addColorStop(1, '#f6d88d');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, w, h);
 
-    // Sun
-    ctx.fillStyle = 'rgba(255, 234, 167, 0.6)';
+    // Sun glow
+    const sunX = w * 0.78;
+    const sunY = h * 0.19;
+    const sunGlow = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 140);
+    sunGlow.addColorStop(0, 'rgba(255, 244, 199, 0.92)');
+    sunGlow.addColorStop(0.36, 'rgba(255, 202, 104, 0.36)');
+    sunGlow.addColorStop(1, 'rgba(255, 202, 104, 0)');
+    ctx.fillStyle = sunGlow;
     ctx.beginPath();
-    ctx.arc(w * 0.78, h * 0.2, 60, 0, Math.PI * 2);
+    ctx.arc(sunX, sunY, 140, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 248, 214, 0.82)';
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, 42, 0, Math.PI * 2);
     ctx.fill();
 
     // Clouds
     drawClouds();
 
-    // Distant hills
-    ctx.fillStyle = '#6b8e7f';
+    // Distant atmospheric ridge
+    const ridge = ctx.createLinearGradient(0, h - 270, 0, h - 120);
+    ridge.addColorStop(0, '#6aa0a8');
+    ridge.addColorStop(1, '#3e6d6c');
+    ctx.fillStyle = ridge;
     ctx.beginPath();
-    ctx.moveTo(0, h - 180);
+    ctx.moveTo(0, h - 194);
     for (let x = 0; x <= w; x += 40) {
-      ctx.lineTo(x, h - 180 - Math.sin(x * 0.01) * 30);
+      ctx.lineTo(x, h - 192 - Math.sin(x * 0.009) * 22 - Math.cos(x * 0.018) * 12);
     }
-    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    ctx.lineTo(w, h - 92); ctx.lineTo(0, h - 92); ctx.closePath();
     ctx.fill();
 
-    // Ground (grass)
-    const grass = ctx.createLinearGradient(0, h - 150, 0, h);
-    grass.addColorStop(0, '#4a7d3a');
-    grass.addColorStop(1, '#2d4f23');
+    // Foreground marsh
+    const grassTop = h - 150;
+    const grass = ctx.createLinearGradient(0, grassTop, 0, h);
+    grass.addColorStop(0, '#4f944f');
+    grass.addColorStop(0.5, '#2f6d3b');
+    grass.addColorStop(1, '#163f25');
     ctx.fillStyle = grass;
-    ctx.fillRect(0, h - 150, w, 150);
+    ctx.fillRect(0, grassTop, w, 150);
+
+    const water = ctx.createLinearGradient(0, h - 118, 0, h - 32);
+    water.addColorStop(0, 'rgba(64, 177, 181, 0.34)');
+    water.addColorStop(1, 'rgba(10, 59, 66, 0.28)');
+    ctx.fillStyle = water;
+    ctx.beginPath();
+    ctx.moveTo(0, h - 118);
+    for (let x = 0; x <= w; x += 32) {
+      ctx.lineTo(x, h - 112 + Math.sin(x * 0.022) * 8);
+    }
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255, 248, 214, 0.18)';
+    ctx.lineWidth = 2;
+    for (let y = h - 104; y < h - 22; y += 20) {
+      ctx.beginPath();
+      for (let x = 0; x <= w; x += 46) {
+        const yy = y + Math.sin((x + y) * 0.018) * 3;
+        if (x === 0) ctx.moveTo(x, yy);
+        else ctx.lineTo(x, yy);
+      }
+      ctx.stroke();
+    }
 
     // Cattails / reeds silhouettes
-    ctx.fillStyle = '#1f3a18';
-    for (let x = 0; x < w; x += 80) {
-      const rx = x + (x % 160 === 0 ? 10 : 30);
-      const ry = h - 150;
-      ctx.fillRect(rx, ry, 4, 80);
+    ctx.fillStyle = '#15351f';
+    ctx.strokeStyle = 'rgba(15, 50, 28, 0.84)';
+    ctx.lineWidth = 3;
+    for (let x = 0; x < w; x += 58) {
+      const rx = x + (x % 116 === 0 ? 10 : 30);
+      const ry = grassTop + 8 + Math.sin(x * 0.04) * 10;
       ctx.beginPath();
-      ctx.ellipse(rx + 2, ry + 5, 6, 14, 0, 0, Math.PI * 2);
+      ctx.moveTo(rx, h);
+      ctx.lineTo(rx + Math.sin(x) * 8, ry);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(rx + 2, ry + 4, 5, 16, 0, 0, Math.PI * 2);
       ctx.fill();
     }
 
+    // Subtle vignette gives the scene more depth without hiding targets.
+    const vignette = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.25, w / 2, h / 2, Math.max(w, h) * 0.68);
+    vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    vignette.addColorStop(1, 'rgba(4, 10, 18, 0.22)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, w, h);
+
     // Ducks
     state.ducks.forEach(drawDuck);
+
+    // Power-ups
+    state.powerUps.forEach(drawPowerUp);
 
     // Particles
     state.particles.forEach(function (p) {
@@ -977,14 +1227,20 @@
     const ctx = state.ctx;
     state.clouds.forEach(function (c) {
       ctx.globalAlpha = c.alpha;
-      ctx.fillStyle = '#ffffff';
       const s = c.scale;
+      const cloud = ctx.createLinearGradient(0, c.y - 34 * s, 0, c.y + 28 * s);
+      cloud.addColorStop(0, '#ffffff');
+      cloud.addColorStop(1, '#d8edf6');
+      ctx.fillStyle = cloud;
+      ctx.shadowColor = 'rgba(31, 74, 105, 0.18)';
+      ctx.shadowBlur = 18 * s;
       ctx.beginPath();
       ctx.arc(c.x, c.y, 22 * s, 0, Math.PI * 2);
       ctx.arc(c.x + 24 * s, c.y - 6 * s, 26 * s, 0, Math.PI * 2);
       ctx.arc(c.x + 50 * s, c.y, 20 * s, 0, Math.PI * 2);
       ctx.arc(c.x + 28 * s, c.y + 8 * s, 22 * s, 0, Math.PI * 2);
       ctx.fill();
+      ctx.shadowBlur = 0;
     });
     ctx.globalAlpha = 1;
   }
@@ -1000,9 +1256,11 @@
       ctx.translate(s.x, s.y);
       ctx.rotate(s.rotation + progress * 0.8);
       ctx.globalAlpha = alpha;
-      ctx.strokeStyle = '#ffd166';
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+      ctx.strokeStyle = '#ffc857';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.82)';
       ctx.lineWidth = 2;
+      ctx.shadowColor = 'rgba(255, 200, 87, 0.6)';
+      ctx.shadowBlur = 14;
 
       ctx.beginPath();
       ctx.arc(0, 0, radius, 0, Math.PI * 2);
@@ -1096,6 +1354,42 @@
     ctx.beginPath(); ctx.moveTo(-26, -2); ctx.lineTo(-38, -8); ctx.lineTo(-38, 4); ctx.closePath(); ctx.fill();
   }
 
+  function drawPowerUp(p) {
+    const ctx = state.ctx;
+    const color = getPowerUpColor(p.type);
+    const alpha = Math.max(0.25, Math.min(1, p.life / 900));
+    const pulse = Math.sin(p.pulse) * 3;
+    const label = p.type === 'slow' ? 'S' : p.type === 'boost' ? '2x' : p.type === 'focus' ? '+' : 'A';
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(p.x, p.y);
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = 'rgba(7, 18, 31, 0.82)';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, p.r + pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = color;
+    ctx.font = '800 17px Segoe UI, Roboto, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, 0, 1);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.62)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, p.r + 8 + pulse, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * p.life / CONFIG.POWERUP_LIFETIME_MS));
+    ctx.stroke();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
   // ============================================
   // Dog mascot (Duck Hunt classic homage)
   // ============================================
@@ -1164,21 +1458,26 @@
     const x = state.lastMouse.x, y = state.lastMouse.y;
     // Gold skin if purchased, else default red
     if (state.inventory.goldCrosshair) {
-      ctx.strokeStyle = 'rgba(255, 209, 102, 0.95)';
-      ctx.shadowColor = 'rgba(255, 209, 102, 0.6)';
-      ctx.shadowBlur = 12;
+      ctx.strokeStyle = 'rgba(255, 200, 87, 0.96)';
+      ctx.shadowColor = 'rgba(255, 200, 87, 0.72)';
+      ctx.shadowBlur = 16;
     } else {
-      ctx.strokeStyle = 'rgba(255, 80, 80, 0.85)';
-      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(255, 93, 108, 0.92)';
+      ctx.shadowColor = 'rgba(255, 93, 108, 0.48)';
+      ctx.shadowBlur = 10;
     }
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(x, y, 18, 0, Math.PI * 2);
-    ctx.moveTo(x - 24, y); ctx.lineTo(x - 8, y);
-    ctx.moveTo(x + 8, y); ctx.lineTo(x + 24, y);
-    ctx.moveTo(x, y - 24); ctx.lineTo(x, y - 8);
-    ctx.moveTo(x, y + 8); ctx.lineTo(x, y + 24);
+    ctx.arc(x, y, 17, 0, Math.PI * 2);
+    ctx.moveTo(x - 28, y); ctx.lineTo(x - 9, y);
+    ctx.moveTo(x + 9, y); ctx.lineTo(x + 28, y);
+    ctx.moveTo(x, y - 28); ctx.lineTo(x, y - 9);
+    ctx.moveTo(x, y + 9); ctx.lineTo(x, y + 28);
     ctx.stroke();
+    ctx.fillStyle = state.inventory.goldCrosshair ? '#ffc857' : '#ff5d6c';
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
     ctx.shadowBlur = 0;
   }
 
@@ -1220,7 +1519,22 @@
     const head = getDuckHeadCenter(duck);
     const dx = x - head.x;
     const dy = y - head.y;
-    return (dx * dx + dy * dy) <= CONFIG.HEADSHOT_RADIUS * CONFIG.HEADSHOT_RADIUS;
+    const radius = CONFIG.HEADSHOT_RADIUS + (state.effects.focus > 0 ? 12 : 0);
+    return (dx * dx + dy * dy) <= radius * radius;
+  }
+
+  function getPowerUpAt(x, y) {
+    for (let i = state.powerUps.length - 1; i >= 0; i--) {
+      const p = state.powerUps[i];
+      const dx = x - p.x;
+      const dy = y - p.y;
+      const radius = p.r + 12;
+      if ((dx * dx + dy * dy) <= radius * radius) {
+        state.powerUps.splice(i, 1);
+        return p;
+      }
+    }
+    return null;
   }
 
   function handleShoot(clientX, clientY) {
@@ -1228,8 +1542,22 @@
     const p = getCanvasPos(clientX, clientY);
     const x = p.x, y = p.y;
 
-    // Unlimited ammo — no decrement, no block
-    state.ammo = CONFIG.AMMO_PER_WAVE;
+    const powerUp = getPowerUpAt(x, y);
+    if (powerUp) {
+      collectPowerUp(powerUp);
+      return;
+    }
+
+    if (state.mode === 'classic') {
+      if (state.ammo <= 0) {
+        playSound('miss');
+        addFloatingText(window.i18n.t('noAmmo'), x, y, '#ff5d6c');
+        return;
+      }
+      state.ammo--;
+    } else {
+      state.ammo = CONFIG.ARCADE_AMMO;
+    }
     state.shots++;
     playSound('shot');
     spawnShotAnimation(x, y);
@@ -1248,6 +1576,7 @@
       }
     }
     if (!hit) {
+      state.combo = 0;
       playSound('miss');
       addFloatingText(window.i18n.t('missed'), x, y, '#ff6b6b');
       spawnParticles(x, y, '#ffffff', 6);
@@ -1317,10 +1646,19 @@
 
   function updateHUD() {
     document.getElementById('hudScore').textContent = String(state.score);
-    document.getElementById('hudWave').textContent = '∞';
+    document.getElementById('hudWave').textContent = state.mode === 'classic' ? String(state.wave) : '∞';
     document.getElementById('hudBest').textContent = String(state.best);
-    // Unlimited ammo — always show ∞
-    document.getElementById('hudAmmo').textContent = '∞';
+    document.getElementById('hudAmmo').textContent = state.mode === 'classic' ? String(state.ammo) : '∞';
+    const combo = document.getElementById('hudCombo');
+    if (combo) combo.textContent = state.combo > 1 ? ('x' + state.combo) : '0';
+  }
+
+  function setMode(mode) {
+    state.mode = mode === 'classic' ? 'classic' : 'arcade';
+    const arcadeBtn = document.getElementById('arcadeModeBtn');
+    const classicBtn = document.getElementById('classicModeBtn');
+    if (arcadeBtn) arcadeBtn.classList.toggle('active', state.mode === 'arcade');
+    if (classicBtn) classicBtn.classList.toggle('active', state.mode === 'classic');
   }
 
   function updateMenuBest() {
@@ -1391,6 +1729,8 @@
   // Wire up UI events
   // ============================================
   function bindUI() {
+    document.getElementById('arcadeModeBtn').addEventListener('click', function () { setMode('arcade'); });
+    document.getElementById('classicModeBtn').addEventListener('click', function () { setMode('classic'); });
     document.getElementById('startBtn').addEventListener('click', startGame);
     document.getElementById('howToBtn').addEventListener('click', function () {
       showOnly(['howToScreen', 'topBar']);
@@ -1437,7 +1777,9 @@
 
     document.getElementById('langBtn').addEventListener('click', function () {
       const cur = window.i18n.getLanguage();
-      window.i18n.setLanguage(cur === 'ru' ? 'en' : 'ru');
+      const langs = window.i18n.getAvailableLanguages();
+      const next = langs[(langs.indexOf(cur) + 1) % langs.length] || 'en';
+      window.i18n.setLanguage(next);
       applyI18n();
       saveData();
       // Refresh dynamic UI that doesn't use data-i18n directly
@@ -1483,6 +1825,7 @@
     updateMenuBest();
     updateAuthUI();
     updateShopUI();
+    setMode(state.mode);
 
     // Hide loading, show menu
     setTimeout(function () {
