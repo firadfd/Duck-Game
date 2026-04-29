@@ -536,6 +536,48 @@
     state.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  function isPhoneLikeDevice() {
+    const ua = navigator.userAgent || '';
+    const mobileUA = /Android|iPhone|iPod|Windows Phone|Mobile/i.test(ua);
+    const smallViewport = Math.min(window.innerWidth, window.innerHeight) <= 900;
+    return mobileUA || smallViewport;
+  }
+
+  function getFullscreenElement() {
+    return document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement ||
+      null;
+  }
+
+  function requestFullscreen(el) {
+    if (el.requestFullscreen) return el.requestFullscreen();
+    if (el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
+    if (el.mozRequestFullScreen) return el.mozRequestFullScreen();
+    if (el.msRequestFullscreen) return el.msRequestFullscreen();
+    return Promise.reject(new Error('fullscreen not supported'));
+  }
+
+  function tryLockLandscapeForMobile() {
+    if (!isPhoneLikeDevice()) return;
+    const orientation = screen && screen.orientation;
+    if (!orientation || !orientation.lock) return;
+
+    const lockLandscape = function () {
+      orientation.lock('landscape').catch(function () { /* ignore */ });
+    };
+
+    if (getFullscreenElement()) {
+      lockLandscape();
+      return;
+    }
+
+    requestFullscreen(document.documentElement)
+      .then(lockLandscape)
+      .catch(function () { /* ignore */ });
+  }
+
   // ============================================
   // Duck entity
   // ============================================
@@ -763,6 +805,8 @@
   // Game flow
   // ============================================
   function startGame() {
+    tryLockLandscapeForMobile();
+
     state.score = 0;
     state.wave = 1;
     state.ammo = state.mode === 'classic' ? CONFIG.CLASSIC_AMMO_PER_WAVE : CONFIG.ARCADE_AMMO;
