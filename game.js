@@ -98,6 +98,16 @@
     audioCtx: null,
     lastTime: 0,
     inputs: { mouse: false, touch: false },
+    // Sounds
+    sounds: {
+      miss: [],
+      headshot: [],
+      shot: [],
+      hit: [],
+      wave: null,
+      gameOver: null,
+      ready: false
+    },
     // Sprites
     sprites: { ducks: null, dog: null, ready: false },
     // Dog mascot state
@@ -112,7 +122,9 @@
     inventory: {
       ammoConsumables: 0,  // unused ammo packs (consumable)
       goldCrosshair: false // permanent skin
-    }
+    },
+    // Track last played indices for randomization
+    lastPlayed: {}
   };
 
   // ============================================
@@ -122,8 +134,15 @@
     if (!state.audioCtx) {
       try {
         const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (Ctx) state.audioCtx = new Ctx();
-      } catch (e) { /* ignored */ }
+        if (Ctx) {
+          state.audioCtx = new Ctx();
+          console.log('[audio] Context created, state:', state.audioCtx.state);
+        }
+      } catch (e) { console.error('[audio] Failed to create context', e); }
+    }
+    // Attempt to resume if suspended (common browser policy)
+    if (state.audioCtx && state.audioCtx.state === 'suspended') {
+      state.audioCtx.resume().catch(function () { /* ignore */ });
     }
     return state.audioCtx;
   }
@@ -131,29 +150,235 @@
   function playSound(type) {
     if (!state.soundOn) return;
     const ctx = getAudio();
+
+    // 1. Try to find a loaded asset (Buffer or HTML5 Audio)
+    let asset = null;
+    const pickRandom = function (list, key) {
+      if (!list || list.length === 0) return null;
+      if (list.length === 1) return list[0];
+      let idx;
+      do {
+        idx = Math.floor(Math.random() * list.length);
+      } while (idx === state.lastPlayed[key]);
+      state.lastPlayed[key] = idx;
+      return list[idx];
+    };
+
+    if (type === 'miss' && state.sounds.miss.length > 0) {
+      asset = pickRandom(state.sounds.miss, 'miss');
+    } else if (type === 'headshot' && state.sounds.headshot.length > 0) {
+      asset = pickRandom(state.sounds.headshot, 'headshot');
+    } else if (type === 'shot' && state.sounds.shot.length > 0) {
+      asset = pickRandom(state.sounds.shot, 'shot');
+    } else if (type === 'hit' && state.sounds.hit.length > 0) {
+      asset = pickRandom(state.sounds.hit, 'hit');
+    } else if (type === 'wave' && state.sounds.wave) {
+      asset = state.sounds.wave;
+    } else if (type === 'gameOver' && state.sounds.gameOver) {
+      asset = state.sounds.gameOver;
+    }
+
+    // 2. If asset found, play it
+    if (asset) {
+      if (asset instanceof AudioBuffer) {
+        playBuffer(asset);
+        return;
+      } else if (asset instanceof Audio) {
+        // HTML5 Audio fallback (good for file://)
+        asset.currentTime = 0;
+        asset.play().catch(() => { });
+        return;
+      }
+    }
+
+    // 3. Fallback to procedural synthesis if no asset worked
     if (!ctx) return;
     try {
       const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      let freq = 440, dur = 0.1, wave = 'sine', vol = 0.15;
-      if (type === 'shot') { freq = 180; dur = 0.08; wave = 'square'; vol = 0.12; }
-      else if (type === 'hit') { freq = 720; dur = 0.15; wave = 'triangle'; vol = 0.18; }
-      else if (type === 'headshot') { freq = 980; dur = 0.22; wave = 'triangle'; vol = 0.22; }
-      else if (type === 'miss') { freq = 110; dur = 0.12; wave = 'sawtooth'; vol = 0.08; }
-      else if (type === 'wave') { freq = 880; dur = 0.3; wave = 'triangle'; vol = 0.2; }
-      else if (type === 'gameOver') { freq = 220; dur = 0.5; wave = 'sawtooth'; vol = 0.18; }
-      osc.type = wave;
-      osc.frequency.setValueAtTime(freq, now);
-      if (type === 'hit') osc.frequency.exponentialRampToValueAtTime(freq * 1.5, now + dur);
-      if (type === 'headshot') osc.frequency.exponentialRampToValueAtTime(freq * 2, now + dur);
-      if (type === 'gameOver') osc.frequency.exponentialRampToValueAtTime(80, now + dur);
-      gain.gain.setValueAtTime(vol, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
-      osc.start(now);
-      osc.stop(now + dur);
+      gain.connect(ctx.destination);
+      // ... existing procedural logic ...
+      if (type === 'shot') {
+        const noiseBuffer = ctx.createBuffer(1, ctx.sampleRate * 0.1, ctx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < noiseBuffer.length; i++) output[i] = Math.random() * 2 - 1;
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuffer;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(1000, now);
+        filter.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        noise.connect(filter); filter.connect(gain);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        noise.start(now); noise.stop(now + 0.1);
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.exponentialRampToValueAtTime(40, now + 0.1);
+        osc.connect(gain); osc.start(now); osc.stop(now + 0.1);
+      } else if (type === 'hit') {
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(880, now);
+        osc.frequency.exponentialRampToValueAtTime(440, now + 0.15);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+        osc.start(now); osc.stop(now + 0.15);
+      } else if (type === 'headshot') {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1200, now);
+        osc.frequency.exponentialRampToValueAtTime(800, now + 0.2);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+        osc.start(now); osc.stop(now + 0.2);
+      } else if (type === 'miss') {
+        const osc = ctx.createOscillator();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(110, now);
+        osc.frequency.exponentialRampToValueAtTime(55, now + 0.2);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+        osc.start(now); osc.stop(now + 0.2);
+      } else if (type === 'ui' || type === 'click') {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(660, now);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
+        osc.start(now); osc.stop(now + 0.05);
+      } else if (type === 'start') {
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.exponentialRampToValueAtTime(880, now + 0.3);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.start(now); osc.stop(now + 0.3);
+      } else if (type === 'quack') {
+        const osc = ctx.createOscillator();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.exponentialRampToValueAtTime(450, now + 0.05);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now); osc.stop(now + 0.1);
+        setTimeout(function () {
+          const ctx2 = getAudio(); if (!ctx2) return;
+          const now2 = ctx2.currentTime;
+          const osc2 = ctx2.createOscillator();
+          const g2 = ctx2.createGain();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(400, now2);
+          osc2.frequency.exponentialRampToValueAtTime(450, now2 + 0.05);
+          osc2.connect(g2); g2.connect(ctx2.destination);
+          g2.gain.setValueAtTime(0.08, now2);
+          g2.gain.exponentialRampToValueAtTime(0.01, now2 + 0.1);
+          osc2.start(now2); osc2.stop(now2 + 0.1);
+        }, 120);
+      } else if (type === 'wave') {
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(523.25, now);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+        osc.start(now); osc.stop(now + 0.4);
+      } else if (type === 'gameOver') {
+        const osc = ctx.createOscillator();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        osc.frequency.exponentialRampToValueAtTime(80, now + 0.5);
+        osc.connect(gain);
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+        osc.start(now); osc.stop(now + 0.5);
+      }
     } catch (e) { /* ignore */ }
+  }
+
+  function playBuffer(buffer) {
+    const ctx = getAudio();
+    if (!ctx || !buffer) return;
+    try {
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      const gain = ctx.createGain();
+      gain.gain.value = 0.4;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      source.start(0);
+    } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Loads a sound from URL. Tries AudioContext first, fallbacks to HTML5 Audio.
+   * This is crucial for local file:/// development where fetch() is blocked.
+   */
+  async function loadSoundAsset(url) {
+    const ctx = getAudio();
+    if (ctx) {
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = await ctx.decodeAudioData(arrayBuffer);
+          return buffer; // Success: High-performance AudioBuffer
+        }
+      } catch (e) { /* fallback to HTML5 Audio */ }
+    }
+
+    // Fallback: HTML5 Audio (usually works on file://)
+    return new Promise((resolve) => {
+      const audio = new Audio();
+      audio.oncanplaythrough = () => resolve(audio);
+      audio.onerror = () => resolve(null);
+      audio.src = url;
+    });
+  }
+
+  async function loadGameSounds() {
+    const missUrls = ['assets/sound/miss_sound.mp3', 'assets/sound/miss_sound2.mp3', 'assets/sound/miss_sound_3.mp3'];
+    const headshotUrls = ['assets/sound/headshot_sound.mp3', 'assets/sound/headshot_sound2.mp3'];
+    const shotUrls = ['assets/sound/shot.mp3', 'assets/sound/shot_sound.mp3'];
+    const hitUrls = ['assets/sound/hit.mp3', 'assets/sound/hit_sound.mp3'];
+    const waveUrl = 'assets/sound/wave_complete.mp3';
+    const gameOverUrl = 'assets/sound/meme-end.mp3';
+
+    try {
+      const [miss, head, shot, hit, wave, over] = await Promise.all([
+        Promise.all(missUrls.map(loadSoundAsset)),
+        Promise.all(headshotUrls.map(loadSoundAsset)),
+        Promise.all(shotUrls.map(loadSoundAsset)),
+        Promise.all(hitUrls.map(loadSoundAsset)),
+        loadSoundAsset(waveUrl),
+        loadSoundAsset(gameOverUrl)
+      ]);
+
+      state.sounds.miss = miss.filter(Boolean);
+      state.sounds.headshot = head.filter(Boolean);
+      state.sounds.shot = shot.filter(Boolean);
+      state.sounds.hit = hit.filter(Boolean);
+      state.sounds.wave = wave;
+      state.sounds.gameOver = over;
+      state.sounds.ready = true;
+
+      console.log('[audio] Assets loaded:', {
+        miss: state.sounds.miss.length,
+        headshot: state.sounds.headshot.length,
+        shot: state.sounds.shot.length,
+        hit: state.sounds.hit.length,
+        wave: !!state.sounds.wave,
+        gameOver: !!state.sounds.gameOver
+      });
+    } catch (e) { console.warn('[audio] load error', e); }
   }
 
   // ============================================
@@ -333,7 +558,7 @@
       state.ammo += CONFIG.EXTRA_AMMO_AMOUNT;
       updateHUD();
       addFloatingText('+' + CONFIG.EXTRA_AMMO_AMOUNT + ' ' + window.i18n.t('ammo'),
-                       state.width / 2, 80, '#ffd166');
+        state.width / 2, 80, '#ffd166');
     }
   }
 
@@ -839,12 +1064,13 @@
     document.getElementById('pauseBtn').classList.remove('hidden');
     updateHUD();
     gameplayStart();
+    playSound('start');
     // Apply any consumable ammo purchased outside gameplay
     while (state.inventory.ammoConsumables > 0) applyAmmoConsumable();
     // Dog intro: peek out and say "Ready?"
     triggerDog([
       { frame: SPRITE.DOG_FRAME.hidden, ms: 200 },
-      { frame: SPRITE.DOG_FRAME.peek,   ms: 1000 },
+      { frame: SPRITE.DOG_FRAME.peek, ms: 1000 },
       { frame: SPRITE.DOG_FRAME.hidden, ms: 200 }
     ], 'dogReady');
   }
@@ -868,6 +1094,7 @@
     state.spawnTimer = 1500; // longer delay to show dog reaction
     state.powerUpTimer = 1800;
     updateHUD();
+    playSound('wave');
 
     // Show wave complete toast
     const toast = document.getElementById('waveToast');
@@ -879,13 +1106,13 @@
     if (perfect) {
       triggerDog([
         { frame: SPRITE.DOG_FRAME.hidden, ms: 200 },
-        { frame: SPRITE.DOG_FRAME.laugh,  ms: 1500 },
+        { frame: SPRITE.DOG_FRAME.laugh, ms: 1500 },
         { frame: SPRITE.DOG_FRAME.hidden, ms: 200 }
       ], 'dogHaha');
     } else {
       triggerDog([
         { frame: SPRITE.DOG_FRAME.hidden, ms: 200 },
-        { frame: SPRITE.DOG_FRAME.peek,   ms: 1000 },
+        { frame: SPRITE.DOG_FRAME.peek, ms: 1000 },
         { frame: SPRITE.DOG_FRAME.hidden, ms: 200 }
       ], 'dogNice');
     }
@@ -918,7 +1145,7 @@
     // Dog laughs at the player on game over (homage to the original NES title)
     triggerDog([
       { frame: SPRITE.DOG_FRAME.hidden, ms: 100 },
-      { frame: SPRITE.DOG_FRAME.laugh,  ms: 1800 },
+      { frame: SPRITE.DOG_FRAME.laugh, ms: 1800 },
       { frame: SPRITE.DOG_FRAME.hidden, ms: 100 }
     ], 'dogHaha');
 
@@ -1366,10 +1593,10 @@
   function drawDuckProcedural(ctx, d) {
     const wingUp = Math.sin(d.flap) > 0;
     const colors = {
-      gold:    { body: '#ffd166', belly: '#fff3c0', head: '#ffb700', wing: '#e8a800' },
-      brown:   { body: '#8b5e3c', belly: '#d4b894', head: '#583c26', wing: '#6c482c' },
+      gold: { body: '#ffd166', belly: '#fff3c0', head: '#ffb700', wing: '#e8a800' },
+      brown: { body: '#8b5e3c', belly: '#d4b894', head: '#583c26', wing: '#6c482c' },
       mallard: { body: '#8b5e3c', belly: '#e0c8a8', head: '#2d6e3c', wing: '#69462a' },
-      wood:    { body: '#5a4a8c', belly: '#dcc8e6', head: '#3c286e', wing: '#46386e' }
+      wood: { body: '#5a4a8c', belly: '#dcc8e6', head: '#3c286e', wing: '#46386e' }
     };
     const c = colors[d.type] || colors.brown;
     // Body
@@ -1546,9 +1773,9 @@
 
   function isPointInDuckBody(x, y, duck) {
     return x >= duck.x &&
-           x <= duck.x + duck.w &&
-           y >= duck.y &&
-           y <= duck.y + duck.h;
+      x <= duck.x + duck.w &&
+      y >= duck.y &&
+      y <= duck.y + duck.h;
   }
 
   function getDuckHeadCenter(duck) {
@@ -1632,6 +1859,26 @@
     const canvas = state.canvas;
     let lastTouchAt = 0;
 
+    // Standard AudioContext "unlock" on first interaction
+    const unlockAudio = function () {
+      const ctx = getAudio();
+      if (ctx && ctx.state === 'suspended') {
+        ctx.resume().then(function () {
+          console.log('[audio] Context unlocked');
+          window.removeEventListener('click', unlockAudio);
+          window.removeEventListener('touchstart', unlockAudio);
+          window.removeEventListener('keydown', unlockAudio);
+        });
+      } else {
+        window.removeEventListener('click', unlockAudio);
+        window.removeEventListener('touchstart', unlockAudio);
+        window.removeEventListener('keydown', unlockAudio);
+      }
+    };
+    window.addEventListener('click', unlockAudio);
+    window.addEventListener('touchstart', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
+
     canvas.addEventListener('mousemove', function (e) {
       state.inputs.mouse = true;
       state.lastMouse = getCanvasPos(e.clientX, e.clientY);
@@ -1679,7 +1926,7 @@
    */
   function showOnly(visibleIds) {
     const all = ['menuScreen', 'pauseScreen', 'gameOverScreen', 'howToScreen',
-                  'leaderboardScreen', 'shopScreen', 'hud', 'topBar'];
+      'leaderboardScreen', 'shopScreen', 'hud', 'topBar'];
     all.forEach(function (id) {
       if (visibleIds.indexOf(id) === -1) hide(id);
     });
@@ -1773,26 +2020,36 @@
   // Wire up UI events
   // ============================================
   function bindUI() {
-    document.getElementById('arcadeModeBtn').addEventListener('click', function () { setMode('arcade'); });
-    document.getElementById('classicModeBtn').addEventListener('click', function () { setMode('classic'); });
+    const withSfx = function (fn) {
+      return function () {
+        playSound('ui');
+        fn.apply(this, arguments);
+      };
+    };
+
+    document.getElementById('arcadeModeBtn').addEventListener('click', function () { setMode('arcade'); playSound('ui'); });
+    document.getElementById('classicModeBtn').addEventListener('click', function () { setMode('classic'); playSound('ui'); });
     document.getElementById('startBtn').addEventListener('click', startGame);
     document.getElementById('howToBtn').addEventListener('click', function () {
+      playSound('ui');
       showOnly(['howToScreen', 'topBar']);
     });
-    document.getElementById('howToOkBtn').addEventListener('click', goToMenu);
+    document.getElementById('howToOkBtn').addEventListener('click', withSfx(goToMenu));
     document.getElementById('leaderboardBtn').addEventListener('click', function () {
+      playSound('ui');
       showOnly(['leaderboardScreen', 'topBar']);
       fetchLeaderboard();
     });
-    document.getElementById('lbBackBtn').addEventListener('click', goToMenu);
-    document.getElementById('resumeBtn').addEventListener('click', resumeGame);
-    document.getElementById('pauseMenuBtn').addEventListener('click', goToMenu);
+    document.getElementById('lbBackBtn').addEventListener('click', withSfx(goToMenu));
+    document.getElementById('resumeBtn').addEventListener('click', function () { resumeGame(); playSound('ui'); });
+    document.getElementById('pauseMenuBtn').addEventListener('click', withSfx(goToMenu));
     document.getElementById('restartBtn').addEventListener('click', startGame);
-    document.getElementById('overMenuBtn').addEventListener('click', goToMenu);
-    document.getElementById('pauseBtn').addEventListener('click', pauseGame);
+    document.getElementById('overMenuBtn').addEventListener('click', withSfx(goToMenu));
+    document.getElementById('pauseBtn').addEventListener('click', function () { pauseGame(); playSound('ui'); });
 
     // Shop
     document.getElementById('shopBtn').addEventListener('click', function () {
+      playSound('ui');
       showOnly(['shopScreen', 'topBar']);
       // Reset previous message
       const msg = document.getElementById('shopMsg');
@@ -1800,7 +2057,7 @@
       msg.classList.remove('error');
       updateShopUI();
     });
-    document.getElementById('shopBackBtn').addEventListener('click', goToMenu);
+    document.getElementById('shopBackBtn').addEventListener('click', withSfx(goToMenu));
     document.getElementById('buyAmmoBtn').addEventListener('click', function () {
       purchaseProduct(CONFIG.PRODUCT_AMMO);
     });
@@ -1820,6 +2077,7 @@
     });
 
     document.getElementById('langBtn').addEventListener('click', function () {
+      playSound('ui');
       const cur = window.i18n.getLanguage();
       const langs = window.i18n.getAvailableLanguages();
       const next = langs[(langs.indexOf(cur) + 1) % langs.length] || 'en';
@@ -1835,6 +2093,7 @@
 
     document.getElementById('soundBtn').addEventListener('click', function () {
       state.soundOn = !state.soundOn;
+      if (state.soundOn) playSound('ui');
       updateSoundIcon();
       saveData();
     });
@@ -1859,9 +2118,10 @@
     bindUI();
     setupInput();
 
-    // Load sprite atlases (parallel with SDK init)
-    const [, ] = await Promise.all([
+    // Load sprite atlases and sounds (parallel with SDK init)
+    const [, ,] = await Promise.all([
       loadSprites(),
+      loadGameSounds(),
       initSDK()
     ]);
 
